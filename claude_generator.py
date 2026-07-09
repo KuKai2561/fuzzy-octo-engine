@@ -992,7 +992,7 @@ def generate(item_labels: list, construction_prompt: str,
     evolve_note   = _build_evolve_note(reference_context)
 
     user_msg = (
-        f"以下の工事情報に基づき、三重県伊勢建設事務所向けの様式４技術提案書を生成してください。\n\n"
+        f"以下の工事情報に基づき、様式４技術提案書を生成してください。\n\n"
         f"{project_block}"
         f"{docs_block}"
         f"{ref_block}"

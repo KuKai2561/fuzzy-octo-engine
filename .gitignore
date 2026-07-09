@@ -1,0 +1,30 @@
+# APIキー等の秘匿情報（st.secrets のローカルファイルと平文フォールバック設定）
+config.json
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 実行時に生成されるデータ（提案書履歴・DB・アップロード資料等）
+data/current_docs/
+data/references/
+data/*.db
+data/*.xlsx
+data/*.docx
+data/streamlit.log
+data/item_history.json
+data/prompt_history.json
+
+# ログ・一時ファイル
+startup_log.txt
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# エディタ
+.vscode/
+.idea/

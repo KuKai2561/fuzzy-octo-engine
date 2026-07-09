@@ -1227,8 +1227,22 @@ step = st.session_state.step
 if not _load_api_key_ui():
     page_setup()
 else:
-    # AIモデルは claude-opus-4-8 に固定（ユーザーによる変更は不可）
-    st.session_state["ai_model"] = "claude-opus-4-8"
+    # AIモデル切り替え（デフォルト: Opus 4.8）
+    _MODEL_LABELS = {"claude-opus-4-8": "🟢 Opus 4.8", "claude-fable-5": "🟣 Fable 5"}
+    _model_options = list(_MODEL_LABELS.keys())
+    _current_model = st.session_state.get("ai_model", "claude-opus-4-8")
+    if _current_model not in _model_options:
+        _current_model = "claude-opus-4-8"
+    _selected_model = st.radio(
+        "AIモデル",
+        options=_model_options,
+        format_func=lambda m: _MODEL_LABELS[m],
+        index=_model_options.index(_current_model),
+        horizontal=True,
+        key="_ai_model_radio",
+        label_visibility="collapsed",
+    )
+    st.session_state["ai_model"] = _selected_model
 
     _progress_bar(step)
     st.write("")

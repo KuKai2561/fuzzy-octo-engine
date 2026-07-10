@@ -24,6 +24,16 @@ import api_key_manager as akm
 
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 _DEFAULT_OUT_DIR = os.path.join(_APP_DIR, "data")
+_VERSION_FILE = os.path.join(_APP_DIR, "VERSION")
+
+
+def _load_app_version() -> str:
+    """VERSIONファイルからアプリのバージョン文字列を読み込む。commit・pushのたびに更新する。"""
+    try:
+        with open(_VERSION_FILE, encoding="utf-8") as f:
+            return f.read().strip() or "?"
+    except Exception:
+        return "?"
 
 
 def _load_api_key_ui() -> str:
@@ -1231,6 +1241,8 @@ def page_step4():
 # ─────────────────────────────────────
 _sidebar()
 step = st.session_state.step
+
+st.caption(f"🔧 v{_load_app_version()}")
 
 if not _load_api_key_ui():
     page_setup()

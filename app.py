@@ -753,7 +753,7 @@ def page_step2():
 
             with col_pick:
                 st.caption("別の候補に差し替え")
-                _cand_key = f"_cands_{i}_{ni}"
+                _cand_key = f"_cands_{notes_ver}_{i}_{ni}"
                 ai_cands = st.session_state.get(_cand_key)
 
                 if st.button("🤖 AIで候補を生成", key=f"gai_{notes_ver}_{i}_{ni}",
@@ -847,6 +847,7 @@ def page_step3():
     st.caption("各留意点に対して４つの理由が自動生成されています。内容を確認・編集してください。４つの理由がそれぞれExcelテンプレートの1行に書き込まれます。")
 
     tabs = st.tabs([item_icon(i) for i in range(3)])
+    notes_ver = st.session_state.get("_notes_gen", 0)
 
     for i, (tab, item) in enumerate(zip(tabs, st.session_state.item_labels)):
         with tab:
@@ -882,7 +883,7 @@ def page_step3():
                         f"理由{REASON_LABELS[ri]}　{label}",
                         value=val,
                         height=68,
-                        key=f"reason_{i}_{ni}_{ri}",
+                        key=f"reason_{notes_ver}_{i}_{ni}_{ri}",
                         placeholder="理由を入力してください（〜ため。で終わると自然です）",
                     )
                     n_chars = len(new_val)
@@ -1214,6 +1215,13 @@ def page_step4():
                   "_comp_input_mode", "_proj_input_mode",
                   "ai_score_result", "ai_score_signature", "ai_score_error"]:
             if k in st.session_state:
+                del st.session_state[k]
+        # notes_ver が次回0から再スタートするため、versioned なウィジェットキー
+        # （s2n_/reason_/_cands_/gai_/pick_/use_ 等）を残すと前回の値が再利用されて
+        # しまう。該当キーを一括で削除する。
+        _stale_prefixes = ("s2n_", "reason_", "_cands_", "gai_", "pick_", "use_")
+        for k in list(st.session_state.keys()):
+            if k.startswith(_stale_prefixes):
                 del st.session_state[k]
         go(1)
 

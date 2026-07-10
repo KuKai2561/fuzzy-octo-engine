@@ -496,7 +496,7 @@ def page_step1():
             if not _auto_docs:
                 st.warning("先に工事資料をアップロードしてください。")
             else:
-                with st.spinner("工事資料を解析してプロンプトを生成中…"):
+                with st.spinner("工事資料を解析し、類似事例・地域特性をWeb検索しながらプロンプトを生成中…（1分程度かかる場合があります）"):
                     try:
                         _auto_result = cg.generate_prompt_from_docs(
                             _auto_docs, pn or st.session_state.get("project_name", ""),

@@ -370,9 +370,12 @@ _FABLE_MODEL = "claude-fable-5"
 _FALLBACK_MODEL = "claude-opus-4-8"
 _FALLBACK_BETA = "server-side-fallback-2026-06-01"
 
+# Web検索ツール（施工条件プロンプト生成時に類似工事・地域特性を調査するために使用）
+_WEB_SEARCH_TOOL = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 6}]
+
 
 def _create_message(client: "anthropic.Anthropic", user_msg: str, max_tokens: int = 16000,
-                     model: str = None, system: str = None):
+                     model: str = None, system: str = None, tools: list = None):
     """
     Claude にリクエストを送る。
     model が None または Claude Fable 5 の場合：Fable 5 を beta エンドポイントで呼び出し、
@@ -382,8 +385,10 @@ def _create_message(client: "anthropic.Anthropic", user_msg: str, max_tokens: in
     この関数の model=None はライブラリとして呼ばれた場合の安全側デフォルト（Fable 5扱い）に過ぎない。
     system を省略した場合は、生成用ペルソナ（_SYSTEM）を使用する。採点等の別ペルソナが
     必要な呼び出し元は system=_SYSTEM_EVAL のように明示的に渡すこと。
+    tools を渡した場合、Web検索等のサーバー側ツールを有効化する（generate_prompt_from_docs用）。
     """
     sys_prompt = system if system is not None else _SYSTEM
+    extra = {"tools": tools} if tools else {}
     if model is None or model == _FABLE_MODEL:
         return client.beta.messages.create(
             model=_FABLE_MODEL,
@@ -393,6 +398,7 @@ def _create_message(client: "anthropic.Anthropic", user_msg: str, max_tokens: in
             betas=[_FALLBACK_BETA],
             fallbacks=[{"model": _FALLBACK_MODEL}],
             output_config={"effort": "high"},
+            **extra,
         )
     return client.messages.create(
         model=model,
@@ -400,11 +406,12 @@ def _create_message(client: "anthropic.Anthropic", user_msg: str, max_tokens: in
         system=sys_prompt,
         messages=[{"role": "user", "content": user_msg}],
         output_config={"effort": "high"},
+        **extra,
     )
 
 
 def _extract_text(msg, strip_code_fence: bool = True) -> str:
-    """応答からテキストを取り出す。refusal・空応答を分かりやすいエラーに変換する。"""
+    """応答から最初のテキストブロックを取り出す。refusal・空応答を分かりやすいエラーに変換する。"""
     if getattr(msg, "stop_reason", None) == "refusal":
         raise ValueError("AIが安全上の理由で応答を拒否しました。内容を見直すか再試行してください。")
     text = next((b.text for b in msg.content if b.type == "text"), "")
@@ -414,6 +421,21 @@ def _extract_text(msg, strip_code_fence: bool = True) -> str:
     if strip_code_fence:
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
+    return text
+
+
+def _extract_final_text(msg) -> str:
+    """
+    Web検索等のサーバー側ツールを使った応答から最終テキストを取り出す。
+    検索中の実況・検討コメントがテキストブロックとして混ざることがあるため、
+    最初のブロックではなく最後のテキストブロック（検索を踏まえた最終回答）を返す。
+    """
+    if getattr(msg, "stop_reason", None) == "refusal":
+        raise ValueError("AIが安全上の理由で応答を拒否しました。内容を見直すか再試行してください。")
+    text_blocks = [b.text for b in msg.content if b.type == "text"]
+    text = (text_blocks[-1] if text_blocks else "").strip()
+    if not text:
+        raise ValueError("APIから有効なテキスト応答が返りませんでした")
     return text
 
 
@@ -1019,7 +1041,14 @@ def generate(item_labels: list, construction_prompt: str,
 # ================================================================
 def generate_prompt_from_docs(docs_context: str, project_name: str = "",
                                api_key: str = None, model: str = None) -> str:
-    """工事資料を解析して施工条件プロンプトを自動生成する。"""
+    """
+    工事資料を解析して施工条件プロンプトを自動生成する。
+    施工条件プロンプトは後続の留意点・理由生成の精度を左右する最重要の入力情報のため、
+    (1) アップロードされた資料からの詳細抽出を最優先しつつ、
+    (2) Web検索ツールで類似工事の事例・現場周辺の地域特性（気象・地形・交通・環境規制等）を
+        調査し、資料の事実を補強・具体化したうえで、
+    (3) 情報密度が最も高いプロンプトを毎回組み立てる。
+    """
     key = api_key or _load_api_key()
     client = anthropic.Anthropic(api_key=key, timeout=300.0)
 
@@ -1030,26 +1059,45 @@ def generate_prompt_from_docs(docs_context: str, project_name: str = "",
         f"以下の工事資料を読み込み、技術提案書（様式４）の留意点生成に使う施工条件プロンプトを作成してください。\n\n"
         f"{project_block}"
         f"{docs_block}\n"
-        f"【作成ルール】\n"
-        f"・【最重要】この工事資料に実際に書かれている事実のみを記述すること。資料に無い\n"
-        f"  工種・環境・作業を推測や一般知識で補ってはならない。この工事に実在しない\n"
-        f"  工種・環境要素は一切書かないこと。\n"
+        f"【作業手順】\n"
+        f"1. まず工事資料に実際に書かれている情報（地名・工種・使用機械・数量・工期・\n"
+        f"   施工条件・関係機関協議状況等）を一字一句見落とさず、できる限り細かく漏れなく\n"
+        f"   抽出すること。これが最優先かつ唯一の事実源である。\n"
+        f"2. 次に、Web検索ツールを使って以下を徹底的に調べること：\n"
+        f"   ・工事名・工種・場所から推測される同種・同等の工事事例（発注者の入札公告、\n"
+        f"     過去の類似工事の技術提案書公開情報、業界誌の施工事例等）\n"
+        f"   ・工事現場が所在する地域の地域特性（気候・地形・地質傾向、周辺の道路・河川・\n"
+        f"     住宅地等のインフラ状況、その地域で特有の施工上の留意事項や規制）\n"
+        f"   検索は1回で終わらせず、キーワードを変えながら複数回行い、できるだけ多くの\n"
+        f"   関連情報にあたること。\n"
+        f"3. 資料から得た事実（最優先）と、検索で得た同種工事の一般的な留意点・地域特性\n"
+        f"   （事実の補強・具体化のためにのみ使用）を統合し、この工事に固有の施工条件\n"
+        f"   プロンプトを組み立てること。\n\n"
+        f"【厳守事項】\n"
+        f"・工事の場所・工種・数量・工期など、工事資料に明記された事実と検索で得た一般情報が\n"
+        f"  矛盾する場合は、必ず工事資料の記載を優先すること。\n"
+        f"・検索で得た内容は、あくまで「今回の工事に実際に当てはまると判断できるもの」だけを\n"
+        f"  採用すること。工事資料に無い工種・作業内容を検索結果から持ち込んで捏造しては\n"
+        f"  ならない（例：今回が山間部の道路工事なら、検索で港湾工事の事例が出てきても\n"
+        f"  それを混入させない）。\n"
         f"・工事の概要（場所・工種・使用機械・数量）を資料に基づいて含めること\n"
-        f"・周辺環境の制約は、資料から読み取れるもののみ含めること（該当する場合の例：\n"
-        f"  交通・近隣住民・河川・農地・漁業・観光等。資料に無いものは書かない）\n"
-        f"・施工上の特殊条件は、資料から読み取れるもののみ含めること（該当する場合の例：\n"
-        f"  季節・気象・地形・地質・搬入路・仮設・潮汐・浅水域等。資料に無いものは書かない）\n"
-        f"・安全管理上の重要事項も、資料から読み取れるもののみ含めること\n"
-        f"・150〜250字程度の日本語文章（箇条書き不可・体言止め可・文章形式）\n"
+        f"・周辺環境の制約は、資料および検索で裏付けが取れたもののみ含めること（該当する\n"
+        f"  場合の例：交通・近隣住民・河川・農地・漁業・観光等）\n"
+        f"・施工上の特殊条件は、資料および検索で裏付けが取れたもののみ含めること（該当する\n"
+        f"  場合の例：季節・気象・地形・地質・搬入路・仮設等）\n"
+        f"・安全管理上の重要事項も、資料から読み取れるもの・検索で裏付けが取れたものを\n"
+        f"  含めること\n"
+        f"・200〜350字程度の日本語文章（箇条書き不可・体言止め可・文章形式）\n"
         f"・このプロンプト自体が、後続の留意点・理由生成の精度を左右する入力情報になる。\n"
-        f"  抽象的な要約ではなく、設計図書中の固有名詞・数値・制約条件をできる限り\n"
-        f"  具体的に盛り込み、情報密度の高い文章にすること\n\n"
-        f"プロンプト文章のみを出力してください（タイトル・説明・記号は不要）："
+        f"  抽象的な要約ではなく、固有名詞・数値・制約条件をできる限り具体的に盛り込み、\n"
+        f"  地域特性を踏まえた情報密度の最も高い文章にすること\n\n"
+        f"検索や検討の過程は出力に含めず、最後に施工条件プロンプトの文章のみを出力して\n"
+        f"ください（タイトル・説明・箇条書き記号は不要）："
     )
 
     try:
-        msg = _create_message(client, user_msg, model=model)
+        msg = _create_message(client, user_msg, model=model, tools=_WEB_SEARCH_TOOL)
     except anthropic.RateLimitError:
         raise RuntimeError("APIのレート制限に達しました。しばらく待ってから再試行してください。")
 
-    return _extract_text(msg, strip_code_fence=False)
+    return _extract_final_text(msg)

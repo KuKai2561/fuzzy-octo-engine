@@ -172,10 +172,29 @@ def _save_current_doc(name: str, data: bytes):
     with open(os.path.join(_CURRENT_DOCS_DIR, name), "wb") as f:
         f.write(data)
 
+def _heic_to_jpeg(data: bytes) -> bytes:
+    """HEIC画像バイト列をJPEGバイト列に変換する。以降の保存・解析はJPEGとして統一的に扱う。"""
+    import io
+    import pillow_heif
+    from PIL import Image
+    heif_file = pillow_heif.read_heif(data)
+    img = Image.frombytes(heif_file.mode, heif_file.size, heif_file.data, "raw")
+    out = io.BytesIO()
+    img.convert("RGB").save(out, format="JPEG", quality=90)
+    return out.getvalue()
+
 def _on_doc_upload():
     n = st.session_state.get("_doc_up_n", 0)
     for uf in (st.session_state.get(f"doc_uploader_{n}") or []):
-        _save_current_doc(uf.name, uf.read())
+        name, data = uf.name, uf.read()
+        ext = os.path.splitext(name)[1].lower()
+        if ext in (".heic", ".heif"):
+            try:
+                data = _heic_to_jpeg(data)
+                name = os.path.splitext(name)[0] + ".jpg"
+            except Exception:
+                pass  # 変換失敗時は元のHEICのまま保存（AI画像入力の対象外になるのみ）
+        _save_current_doc(name, data)
     st.session_state["_doc_up_n"] = n + 1
 
 def _on_ref_upload():
@@ -223,9 +242,50 @@ def _get_current_docs_context() -> str:
             except Exception:
                 pass
         else:
-            # DOCX・画像等は現状未対応のためスキップ
+            # DOCX等は現状未対応のためスキップ（画像は_get_current_images側で扱う）
             continue
     return "\n\n".join(parts)
+
+_MAX_PROMPT_IMAGES = 10
+
+def _get_current_images() -> list:
+    """
+    current_docs フォルダ内の画像（png/jpg/jpeg、HEICはアップロード時にjpgへ変換済み）を
+    Claude API に渡せる形式（Base64・長辺1568px以下にリサイズ済みJPEG）のリストにして返す。
+    施工前の現場写真・周辺状況の写真・気になる箇所の写真等を施工条件プロンプトの
+    自動生成に画像入力として使うためのもの。最大_MAX_PROMPT_IMAGES枚まで。
+    """
+    if not os.path.exists(_CURRENT_DOCS_DIR):
+        return []
+    try:
+        from PIL import Image
+    except ImportError:
+        return []
+    import io, base64
+    images = []
+    for fname in sorted(os.listdir(_CURRENT_DOCS_DIR)):
+        if len(images) >= _MAX_PROMPT_IMAGES:
+            break
+        fpath = os.path.join(_CURRENT_DOCS_DIR, fname)
+        if not os.path.isfile(fpath):
+            continue
+        if os.path.splitext(fname)[1].lower() not in (".png", ".jpg", ".jpeg"):
+            continue
+        try:
+            img = Image.open(fpath).convert("RGB")
+            long_edge = max(img.size)
+            if long_edge > 1568:
+                scale = 1568 / long_edge
+                img = img.resize((max(1, int(img.width * scale)), max(1, int(img.height * scale))))
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=85)
+            images.append({
+                "media_type": "image/jpeg",
+                "data": base64.b64encode(buf.getvalue()).decode("ascii"),
+            })
+        except Exception:
+            continue
+    return images
 
 # ─────────────────────────────────────
 # ページ設定
@@ -493,14 +553,16 @@ def page_step1():
         st.write("")
         if st.button("🤖 工事資料から自動生成", key="_auto_prompt_btn", use_container_width=True):
             _auto_docs = _get_current_docs_context()
-            if not _auto_docs:
-                st.warning("先に工事資料をアップロードしてください。")
+            _auto_images = _get_current_images()
+            if not _auto_docs and not _auto_images:
+                st.warning("先に工事資料または現場写真をアップロードしてください。")
             else:
-                with st.spinner("工事資料を解析し、類似事例・地域特性をWeb検索しながらプロンプトを生成中…（1分程度かかる場合があります）"):
+                with st.spinner("工事資料・現場写真を解析し、類似事例・地域特性をWeb検索しながらプロンプトを生成中…（1分程度かかる場合があります）"):
                     try:
                         _auto_result = cg.generate_prompt_from_docs(
                             _auto_docs, pn or st.session_state.get("project_name", ""),
                             model=st.session_state["ai_model"],
+                            images=_auto_images,
                         )
                         st.session_state["prompt_textarea"] = _auto_result
                     except Exception as _e:
@@ -549,13 +611,18 @@ def page_step1():
 
     # ── 今回の工事 資料
     st.markdown("---")
-    st.markdown("#### 📁 工事 資料（図面・仕様書・特記仕様書・位置図 等）")
-    st.caption("工事に関する資料をアップロードしてください。複数ファイルを一度に選択できます。")
+    st.markdown("#### 📁 工事 資料（図面・仕様書・特記仕様書・位置図・現場写真 等）")
+    st.caption(
+        "工事に関する資料をアップロードしてください。複数ファイルを一度に選択できます。\n"
+        "施工前の現場写真・周辺状況の写真・気になる箇所の写真（jpg・png・heic対応）も"
+        "アップロードすると、「🤖 工事資料から自動生成」ボタンで写真の内容も踏まえた"
+        "施工条件プロンプトを生成できます。"
+    )
 
     _doc_n = st.session_state.get("_doc_up_n", 0)
     st.file_uploader(
         "資料アップロード",
-        type=["pdf", "png", "jpg", "jpeg", "xlsx", "xls", "docx", "doc"],
+        type=["pdf", "png", "jpg", "jpeg", "heic", "heif", "xlsx", "xls", "docx", "doc"],
         key=f"doc_uploader_{_doc_n}",
         label_visibility="collapsed",
         accept_multiple_files=True,
@@ -568,7 +635,7 @@ def page_step1():
             _size_kb = _doc["size"] / 1024
             _size_str = f"{_size_kb:.0f} KB" if _size_kb < 1024 else f"{_size_kb/1024:.1f} MB"
             _ext = os.path.splitext(_doc["name"])[1].lower()
-            _icon = "🖼️" if _ext in (".png", ".jpg", ".jpeg") else "📄"
+            _icon = "🖼️" if _ext in (".png", ".jpg", ".jpeg", ".heic", ".heif") else "📄"
             _col_doc, _col_del = st.columns([4, 1])
             with _col_doc:
                 st.markdown(
